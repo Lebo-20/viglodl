@@ -63,19 +63,26 @@ async def update_bot(event):
     import subprocess
     import sys
     
-    status_msg = await event.reply("🔄 Menarik pembaruan dari GitHub...")
+    status_msg = await event.reply("🔄 **Menarik pembaruan dari GitHub...**")
     try:
         # Run git pull
         result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True)
-        await status_msg.edit(f"✅ Repositori berhasil di-pull:\n```\n{result.stdout}\n```\n\nSedang memulai ulang sistem (Restarting)...")
         
-        # Disconnect client
+        if "Already up to date" in result.stdout:
+            await status_msg.edit("✅ **Bot sudah versi terbaru!** Tidak ada yang perlu diperbarui.")
+            return
+
+        await status_msg.edit(f"✅ **Update Berhasil!**\n\n```\n{result.stdout}\n```\nSedang memulai ulang layanan (Restarting via PM2)...")
+        
+        # Give a small delay to ensure the message is sent
+        await asyncio.sleep(3)
         await client.disconnect()
         
-        # Restart the script
-        os.execl(sys.executable, sys.executable, *sys.argv)
+        # Exit the process. PM2 will automatically restart it.
+        sys.exit(0)
+        
     except Exception as e:
-        await status_msg.edit(f"❌ Gagal melakukan update: {e}")
+        await status_msg.edit(f"❌ **Gagal melakukan update**: {e}")
 
 @client.on(events.NewMessage(pattern='/panel'))
 async def panel(event):
