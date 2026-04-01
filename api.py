@@ -130,67 +130,87 @@ async def get_stream_url(drama_id: str, ep: int):
 
 
 async def get_latest_dramas(pages=1, **kwargs):
-    """Ambil daftar drama terbaru dari iDrama API."""
+    """Ambil daftar drama terbaru dari iDrama API.
+
+    Alur yang benar:
+    1. GET /home  -> dapat list "navigasi" berisi channel key
+    2. GET /tab/{key} -> dapat daftar drama dari tiap channel tersebut
+    """
     all_dramas = []
     seen_ids = set()
 
-    # Daftar endpoint yang akan discan untuk mencari update drama terbaru
-    endpoints = [
-        "/tab/channel_ddbdbcef", # Seringkali berisi "Daftar Peringkat / Popular"
-        "/tab/channel_7e89a1a2", # Biasanya "Terbaru / Hits"
-        "/home"
-    ]
-
     async with httpx.AsyncClient(timeout=30, headers=HEADERS) as client:
-        for endpoint in endpoints:
+
+        # === STEP 1: Discover channel keys dari /home ===
+        tab_keys = []
+        try:
+            res = await client.get(f"{BASE_IDRAMA}/home", params={"lang": "id"}, timeout=15)
+            if res.status_code == 200:
+                nav_list = res.json().get("list", [])
+                for nav in nav_list:
+                    key = nav.get("key", "")
+                    if key and key.startswith("channel_"):
+                        tab_keys.append(key)
+                    # Tambahkan sub_navs juga (Sedang Tren, Hits Terbaru, dll)
+                    for sub in nav.get("sub_navs", []):
+                        sub_key = sub.get("key", "")
+                        if sub_key and sub_key.startswith("channel_") and sub_key not in tab_keys:
+                            tab_keys.append(sub_key)
+                logger.info(f"[iDrama] /home: ditemukan {len(tab_keys)} channel: {tab_keys}")
+        except Exception as e:
+            logger.error(f"[iDrama] Gagal fetch /home: {e}")
+
+        # Fallback hardcoded jika /home tidak menghasilkan channel
+        if not tab_keys:
+            tab_keys = ["channel_7e89a1a2", "channel_f4904f0b", "channel_a57c8658"]
+            logger.warning(f"[iDrama] /home kosong, pakai fallback keys: {tab_keys}")
+
+        # === STEP 2: Fetch drama dari tiap /tab/{key} ===
+        def extract_dramas_from_tab(raw_data):
+            """Ekstrak short_plays/items dari respons /tab."""
+            result = []
+            items = raw_data if isinstance(raw_data, list) else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if isinstance(item.get("short_plays"), list):
+                    result.extend(item["short_plays"])
+                elif isinstance(item.get("items"), list):
+                    result.extend(item["items"])
+                else:
+                    result.append(item)
+            return result
+
+        for key in tab_keys:
             for page in range(1, pages + 1):
                 try:
-                    url = f"{BASE_IDRAMA}{endpoint}"
+                    url = f"{BASE_IDRAMA}/tab/{key}"
                     params = {"lang": "id", "page": page}
                     res = await client.get(url, params=params, timeout=15)
                     if res.status_code != 200:
-                        logger.warning(f"[iDrama] {endpoint} page {page} HTTP {res.status_code}")
+                        logger.warning(f"[iDrama] /tab/{key} p{page} HTTP {res.status_code}")
                         continue
 
-                    data = res.json()
-                    
-                    # Normalisasi data array vs dict
-                    items = data
-                    if isinstance(data, dict):
-                        items = (data.get("data") or data.get("payloads") or
-                                 data.get("list") or data.get("dramas") or [])
-                        if isinstance(items, dict):
-                            items = (items.get("payloads") or items.get("list") or
-                                     items.get("dramas") or [])
+                    raw = res.json()
+                    dramas_raw = extract_dramas_from_tab(raw if isinstance(raw, list) else [])
 
-                    if not isinstance(items, list):
-                        continue
-
-                    dramas_to_process = []
-                    for item in items:
-                        if isinstance(item, dict):
-                            if "short_plays" in item and isinstance(item["short_plays"], list):
-                                dramas_to_process.extend(item["short_plays"])
-                            elif "items" in item and isinstance(item["items"], list):
-                                dramas_to_process.extend(item["items"])
-                            else:
-                                dramas_to_process.append(item)
-                        else:
-                            dramas_to_process.append(item)
-
-                    for prog in dramas_to_process:
-                        if not isinstance(prog, dict): continue
-                        real_prog = prog.get("program") or prog
-                        
-                        drama_id = str(real_prog.get("id") or real_prog.get("dramaId") or real_prog.get("short_series_id") or "")
+                    added = 0
+                    for prog in dramas_raw:
+                        if not isinstance(prog, dict):
+                            continue
+                        real = prog.get("program") or prog
+                        drama_id = str(
+                            real.get("id") or real.get("dramaId") or
+                            real.get("short_series_id") or ""
+                        )
                         if not drama_id or drama_id in seen_ids:
                             continue
                         seen_ids.add(drama_id)
-                        
-                        title = real_prog.get("short_play_name") or real_prog.get("title") or real_prog.get("name") or ""
-                        poster = (real_prog.get("cover_url") or real_prog.get("poster") or 
-                                  real_prog.get("cover") or real_prog.get("thumbnail") or 
-                                  real_prog.get("image") or "")
+
+                        title = (real.get("short_play_name") or real.get("title") or
+                                 real.get("name") or "")
+                        poster = (real.get("cover_url") or real.get("poster") or
+                                  real.get("cover") or real.get("thumbnail") or "")
 
                         if title:
                             all_dramas.append({
@@ -200,9 +220,12 @@ async def get_latest_dramas(pages=1, **kwargs):
                                 "bookName": title,
                                 "poster": poster,
                             })
+                            added += 1
+
+                    logger.info(f"[iDrama] /tab/{key} p{page}: +{added} drama (total {len(all_dramas)})")
 
                 except Exception as e:
-                    logger.error(f"[iDrama] {endpoint} page {page} error: {e}")
+                    logger.error(f"[iDrama] /tab/{key} p{page} error: {e}")
 
-    logger.info(f"[iDrama] Scan Endpoint Selesai: {len(all_dramas)} drama unik ditemukan")
+    logger.info(f"[iDrama] Selesai: {len(all_dramas)} drama unik ditemukan")
     return all_dramas
