@@ -134,43 +134,75 @@ async def get_latest_dramas(pages=1, **kwargs):
     all_dramas = []
     seen_ids = set()
 
+    # Daftar endpoint yang akan discan untuk mencari update drama terbaru
+    endpoints = [
+        "/tab/channel_ddbdbcef", # Seringkali berisi "Daftar Peringkat / Popular"
+        "/tab/channel_7e89a1a2", # Biasanya "Terbaru / Hits"
+        "/home"
+    ]
+
     async with httpx.AsyncClient(timeout=30, headers=HEADERS) as client:
-        for page in range(1, pages + 1):
-            try:
-                url = f"{BASE_IDRAMA}/home"
-                params = {"lang": "id", "page": page}
-                res = await client.get(url, params=params, timeout=15)
-                if res.status_code != 200:
-                    logger.warning(f"[iDrama] Home page {page} HTTP {res.status_code}")
-                    continue
-
-                data = res.json()
-
-                # iDrama home bisa punya berbagai struktur
-                items = (data.get("data") or data.get("payloads") or
-                         data.get("list") or data.get("dramas") or [])
-                if isinstance(items, dict):
-                    items = (items.get("payloads") or items.get("list") or
-                             items.get("dramas") or [])
-
-                for item in items:
-                    prog = item.get("program") or item
-                    drama_id = str(prog.get("id") or prog.get("dramaId") or "")
-                    if not drama_id or drama_id in seen_ids:
+        for endpoint in endpoints:
+            for page in range(1, pages + 1):
+                try:
+                    url = f"{BASE_IDRAMA}{endpoint}"
+                    params = {"lang": "id", "page": page}
+                    res = await client.get(url, params=params, timeout=15)
+                    if res.status_code != 200:
+                        logger.warning(f"[iDrama] {endpoint} page {page} HTTP {res.status_code}")
                         continue
-                    seen_ids.add(drama_id)
-                    title = prog.get("title") or prog.get("name") or ""
-                    all_dramas.append({
-                        "_source": "idrama",
-                        "id": drama_id,
-                        "title": title,
-                        "bookName": title,
-                        "poster": (prog.get("poster") or prog.get("cover") or
-                                   prog.get("thumbnail") or ""),
-                    })
 
-                logger.info(f"[iDrama] Home page {page}: {len(all_dramas)} drama")
-            except Exception as e:
-                logger.error(f"[iDrama] Home page {page} error: {e}")
+                    data = res.json()
+                    
+                    # Normalisasi data array vs dict
+                    items = data
+                    if isinstance(data, dict):
+                        items = (data.get("data") or data.get("payloads") or
+                                 data.get("list") or data.get("dramas") or [])
+                        if isinstance(items, dict):
+                            items = (items.get("payloads") or items.get("list") or
+                                     items.get("dramas") or [])
 
+                    if not isinstance(items, list):
+                        continue
+
+                    dramas_to_process = []
+                    for item in items:
+                        if isinstance(item, dict):
+                            if "short_plays" in item and isinstance(item["short_plays"], list):
+                                dramas_to_process.extend(item["short_plays"])
+                            elif "items" in item and isinstance(item["items"], list):
+                                dramas_to_process.extend(item["items"])
+                            else:
+                                dramas_to_process.append(item)
+                        else:
+                            dramas_to_process.append(item)
+
+                    for prog in dramas_to_process:
+                        if not isinstance(prog, dict): continue
+                        real_prog = prog.get("program") or prog
+                        
+                        drama_id = str(real_prog.get("id") or real_prog.get("dramaId") or real_prog.get("short_series_id") or "")
+                        if not drama_id or drama_id in seen_ids:
+                            continue
+                        seen_ids.add(drama_id)
+                        
+                        title = real_prog.get("short_play_name") or real_prog.get("title") or real_prog.get("name") or ""
+                        poster = (real_prog.get("cover_url") or real_prog.get("poster") or 
+                                  real_prog.get("cover") or real_prog.get("thumbnail") or 
+                                  real_prog.get("image") or "")
+
+                        if title:
+                            all_dramas.append({
+                                "_source": "idrama",
+                                "id": drama_id,
+                                "title": title,
+                                "bookName": title,
+                                "poster": poster,
+                            })
+
+                except Exception as e:
+                    logger.error(f"[iDrama] {endpoint} page {page} error: {e}")
+
+    logger.info(f"[iDrama] Scan Endpoint Selesai: {len(all_dramas)} drama unik ditemukan")
     return all_dramas
