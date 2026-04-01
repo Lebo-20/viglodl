@@ -33,20 +33,26 @@ async def download_all_episodes(episodes, download_dir: str, semaphore_count: in
 
             for attempt in range(retries):
                 try:
-                    from api import get_stream_url
                     drama_id = ep.get("dramaId") or ep.get("id")
                     ep_number = ep.get("ep") or ep.get("episode")
 
-                    # Ambil URL streaming dari iDrama
-                    stream_data = await get_stream_url(drama_id, ep_number)
-                    if not stream_data or not stream_data.get("m3u8"):
-                        logger.warning(f"⚠️ Attempt {attempt+1}: URL stream kosong ep{ep_num}")
-                        await asyncio.sleep(5 * (attempt + 1))
-                        continue
+                    # Prioritas 1: play_url sudah ada langsung di data episode (API baru)
+                    m3u8_url = ep.get("play_url") or ""
+                    subtitle_url = ep.get("subtitle") or ""
+                    cookies = {}
 
-                    m3u8_url = stream_data["m3u8"]
-                    subtitle_url = stream_data.get("subtitle") or ""
-                    cookies = stream_data.get("cookies") or {}
+                    # Prioritas 2: Fallback ke /unlock jika play_url kosong
+                    if not m3u8_url:
+                        from api import get_stream_url
+                        stream_data = await get_stream_url(drama_id, ep_number)
+                        if not stream_data or not stream_data.get("m3u8"):
+                            logger.warning(f"⚠️ Attempt {attempt+1}: URL stream kosong ep{ep_num}")
+                            await asyncio.sleep(5 * (attempt + 1))
+                            continue
+                        m3u8_url = stream_data["m3u8"]
+                        subtitle_url = stream_data.get("subtitle") or ""
+                        cookies = stream_data.get("cookies") or {}
+
                     cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()]) if cookies else ""
 
                     # Download video via FFmpeg

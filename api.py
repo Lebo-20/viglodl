@@ -26,19 +26,33 @@ async def get_drama_detail(drama_id: str):
                 return None
 
             data = res.json()
+            # API langsung mengembalikan objek drama (bukan dibungkus 'data')
             payload = data.get("data") or data
 
             if not payload or not isinstance(payload, dict):
                 return None
 
-            # Normalisasi field
-            title = payload.get("title") or payload.get("name") or ""
-            intro = (payload.get("description") or payload.get("intro") or
-                     payload.get("synopsis") or "")
-            poster = (payload.get("poster") or payload.get("cover") or
-                      payload.get("thumbnail") or
-                      payload.get("thumbnailExpanded") or "")
-            ep_count = payload.get("episodeCount") or payload.get("totalEp") or 0
+            # Cek error dari API
+            if payload.get("error"):
+                logger.error(f"[iDrama] API error {drama_id}: {payload['error']}")
+                return None
+
+            # Normalisasi field — API baru pakai short_play_name + cover_url
+            title = (payload.get("short_play_name") or payload.get("title") or
+                     payload.get("name") or "")
+            intro = (payload.get("introduction") or payload.get("description") or
+                     payload.get("intro") or payload.get("synopsis") or "")
+            poster = (payload.get("cover_url") or payload.get("compress_cover_url") or
+                      payload.get("poster") or payload.get("cover") or
+                      payload.get("thumbnail") or "")
+            # episode_list langsung di root payload
+            ep_list = payload.get("episode_list") or payload.get("episodes") or []
+            ep_count = (payload.get("total_count") or payload.get("current_count") or
+                        payload.get("episodeCount") or payload.get("totalEp") or len(ep_list))
+
+            if not title:
+                logger.warning(f"[iDrama] Drama {drama_id} tidak punya judul")
+                return None
 
             return {
                 "_source": "idrama",
@@ -55,7 +69,11 @@ async def get_drama_detail(drama_id: str):
 
 
 async def get_all_episodes(drama_id: str, detail=None):
-    """Ambil semua episode dari iDrama API."""
+    """Ambil semua episode dari iDrama API.
+    
+    API baru mengembalikan episode_list langsung di /drama/{id},
+    lengkap dengan play_url di play_info_list. Tidak perlu /unlock lagi.
+    """
     if not detail:
         detail = await get_drama_detail(drama_id)
     if not detail:
@@ -63,36 +81,54 @@ async def get_all_episodes(drama_id: str, detail=None):
 
     raw = detail.get("_raw", {})
 
-    # Coba ambil dari field episodes di payload detail
-    episodes_raw = raw.get("episodes") or raw.get("episodeList") or []
-    if episodes_raw:
+    # Format baru: episode_list[] dengan play_info_list[]
+    episode_list = raw.get("episode_list") or raw.get("episodes") or raw.get("episodeList") or []
+    if episode_list:
         eps = []
-        for ep in episodes_raw:
-            ep_num = (ep.get("ep") or ep.get("episode") or
-                      ep.get("episodeNumber") or ep.get("index"))
-            video_id = ep.get("id") or ep.get("videoId")
-            if ep_num is not None and video_id:
+        for ep in episode_list:
+            ep_num = (ep.get("episode_order") or ep.get("ep") or
+                      ep.get("episode") or ep.get("episodeNumber") or ep.get("index"))
+            ep_id = ep.get("episode_id") or ep.get("id") or ep.get("videoId")
+
+            # Ambil play_url terbaik yang bukan VIP
+            play_url = ""
+            play_info = ep.get("play_info_list") or []
+            for pi in play_info:
+                if not pi.get("is_vip") and pi.get("play_url"):
+                    # Pilih kualitas tertinggi yang tersedia (720p lebih baik dari 540p)
+                    if not play_url or pi.get("height", 0) > 540:
+                        play_url = pi["play_url"]
+
+            # Fallback ke play_url langsung di episode
+            if not play_url:
+                play_url = ep.get("play_url") or ""
+
+            if ep_num is not None and (ep_id or play_url):
                 eps.append({
                     "_source": "idrama",
                     "dramaId": str(drama_id),
                     "ep": int(ep_num),
                     "episode": int(ep_num),
-                    "videoId": str(video_id)
+                    "videoId": str(ep_id) if ep_id else None,
+                    "play_url": play_url,  # sudah siap pakai, tidak perlu /unlock
+                    "subtitle": "",
                 })
         if eps:
+            logger.info(f"[iDrama] {len(eps)} episode ditemukan dari episode_list")
             return sorted(eps, key=lambda x: x["episode"])
 
-    # Fallback: build episode list from episodeCount
+    # Fallback: build list dari episodeCount (pakai /unlock)
     ep_count = detail.get("episodeCount") or 0
     if ep_count > 0:
-        logger.info(f"[iDrama] Membangun daftar {ep_count} episode untuk {drama_id}")
+        logger.info(f"[iDrama] Fallback /unlock: membangun {ep_count} episode untuk {drama_id}")
         return [
             {
                 "_source": "idrama",
                 "dramaId": str(drama_id),
                 "ep": i,
                 "episode": i,
-                "videoId": None  # akan di-unlock lewat /unlock/:id/:ep
+                "videoId": None,
+                "play_url": "",
             }
             for i in range(1, int(ep_count) + 1)
         ]
