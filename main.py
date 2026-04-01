@@ -93,15 +93,15 @@ async def panel_callback(event):
     try:
         if data == b"start_auto":
             BotState.is_auto_running = True
-            await event.answer("Auto-mode started!")
-            await event.edit("🎛 **Dramabox Control Panel**", buttons=get_panel_buttons())
+            await event.answer("Auto-mode dimulai!")
+            await event.edit("🎛 **Panel Kontrol Drama**", buttons=get_panel_buttons())
         elif data == b"stop_auto":
             BotState.is_auto_running = False
-            await event.answer("Auto-mode stopped!")
-            await event.edit("🎛 **Dramabox Control Panel**", buttons=get_panel_buttons())
+            await event.answer("Auto-mode dihentikan!")
+            await event.edit("🎛 **Panel Kontrol Drama**", buttons=get_panel_buttons())
         elif data == b"status":
-            await event.answer(f"Status: {'Running' if BotState.is_auto_running else 'Stopped'}")
-            await event.edit("🎛 **Dramabox Control Panel**", buttons=get_panel_buttons())
+            await event.answer(f"Status: {'Berjalan' if BotState.is_auto_running else 'Berhenti'}")
+            await event.edit("🎛 **Panel Kontrol Drama**", buttons=get_panel_buttons())
     except Exception as e:
         if "message is not modified" in str(e).lower() or "Message string and reply markup" in str(e):
             pass # Ignore if button is already in that state
@@ -110,7 +110,7 @@ async def panel_callback(event):
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
-    await event.reply("Welcome to Dramabox Downloader Bot! 🎉\n\nGunakan perintah `/download {bookId}` untuk mulai.")
+    await event.reply("Selamat datang di Bot Downloader Drama! 🎉\n\nGunakan perintah `/download {ID_DRAMA}` untuk mulai.")
 
 @client.on(events.NewMessage(pattern=r'/download (\d+)'))
 async def on_download(event):
@@ -141,7 +141,7 @@ async def on_download(event):
     description = detail.get("intro") or detail.get("introduction") or detail.get("description") or "No description available."
     poster = detail.get("cover") or detail.get("coverWap") or detail.get("poster") or "" # URL for poster
     
-    status_msg = await event.reply(f"🎬 Drama: **{title}**\n📽 Total Episodes: {len(episodes)}\n\n⏳ Sedang mendownload dan memproses...")
+    status_msg = await event.reply(f"🎬 Drama: **{title}**\n📽 Total Episode: {len(episodes)}\n\n⏳ Sedang mendownload dan memproses...")
     
     BotState.is_processing = True
     processed_ids.add(book_id)
@@ -160,7 +160,7 @@ async def process_drama_full(book_id, chat_id, status_msg=None):
         return False
 
     title = detail.get("title") or detail.get("bookName") or detail.get("name") or f"Drama_{book_id}"
-    description = detail.get("intro") or detail.get("introduction") or detail.get("description") or "No description available."
+    description = detail.get("intro") or detail.get("introduction") or detail.get("description") or "Tidak ada sinopsis tersedia."
     poster = detail.get("cover") or detail.get("coverWap") or detail.get("poster") or ""
     
     # 2. Setup temp directory
@@ -253,28 +253,27 @@ async def auto_mode_loop():
                     title = drama.get("title") or drama.get("bookName") or drama.get("name") or "Unknown"
                     logger.info(f"✨ Found new drama: {title} ({book_id}). Starting process...")
                     
-                    # Notify admin
-                    try:
-                        await client.send_message(ADMIN_ID, f"🆕 **Auto-System Mendeteksi Drama Baru!**\n🎬 `{title}`\n🆔 `{book_id}`\n⏳ Memproses download & merge...")
-                    except: pass
+                    # Process to target channel
+                    final_msg = await client.send_message(ADMIN_ID, f"🆕 **Auto-System Mendeteksi Drama Baru!**\n🎬 `{title}`\n🆔 `{book_id}`\n⏳ Sedang diproses...")
                     
                     BotState.is_processing = True
-                    # Process to target channel
                     success = await process_drama_full(book_id, AUTO_CHANNEL)
                     BotState.is_processing = False
                     
                     if success:
                         logger.info(f"✅ Finished {title}")
                         try:
-                            await client.send_message(ADMIN_ID, f"✅ Sukses Auto-Post: **{title}** ke channel.")
+                            # Cleanup initial notification
+                            await final_msg.delete()
+                            await client.send_message(ADMIN_ID, f"✅ **Selesai**: Drama `{title}` berhasil diposting!")
                         except: pass
                     else:
                         logger.error(f"❌ Failed to process {title}")
-                        BotState.is_auto_running = False
                         try:
-                            await client.send_message(ADMIN_ID, f"🚨 **ERROR**: Proses `{title}` gagal!\n🛑 **Auto-mode OTOMATIS BERHENTI**.\nCek /panel untuk menghidupkan kembali.")
+                            await final_msg.delete()
+                            await client.send_message(ADMIN_ID, f"⚠️ **Gagal memproses**: `{title}`\nSistem akan tetap berjalan.")
                         except: pass
-                        break
+                        continue
                     
                     # Prevent hitting API/Telegram rate limits too hard
                     await asyncio.sleep(10)

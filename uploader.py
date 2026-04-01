@@ -10,7 +10,6 @@ async def upload_progress(current, total, event, msg_text="Uploading..."):
     """Callback function for upload progress."""
     percentage = (current / total) * 100
     try:
-        # Avoid flood by updating every few percentages
         if int(percentage) % 10 == 0:
             await event.edit(f"{msg_text} {percentage:.1f}%")
     except:
@@ -21,24 +20,24 @@ async def upload_drama(client: TelegramClient, chat_id: int,
                        poster_url: str, video_path: str):
     """
     Uploads the drama information and merged video to Telegram.
+    Sequence:
+    1. Send progress message.
+    2. Upload video.
+    3. Send Poster + Description (Clean).
+    4. Send Video (Clean).
+    5. Cleanup status message.
     """
     import subprocess
     import tempfile
+    
+    status_msg = None
     try:
-        # 1. Send Poster + Description
-        caption = f"🎬 **{title}**\n\n📝 **Sinopsis:**\n{description[:500]}..." # Limit caption length
+        # Prepare caption
+        caption = f"🎬 **{title}**\n\n📝 **Sinopsis:**\n{description[:900]}..."
         
-        # Send Photo with Caption
-        sent_info = await client.send_file(
-            chat_id,
-            poster_url,
-            caption=caption,
-            parse_mode='html'
-        )
+        status_msg = await client.send_message(chat_id, f"📡 **[{title}]**\n⚙️ Menyiapkan file & ekstraksi metadata...")
         
-        status_msg = await client.send_message(chat_id, "📤 Ekstraksi Thumbnail & Durasi Video...")
-        
-        # 2. Extract Duration & Dimensions (Fallback directly if fails)
+        # 1. Extract Duration & Dimensions
         duration = 0
         width = 0
         height = 0
@@ -49,22 +48,20 @@ async def upload_drama(client: TelegramClient, chat_id: int,
                 width = int(output[0])
                 height = int(output[1])
                 duration = int(float(output[2]))
-        except Exception as e:
-            logger.warning(f"Failed to extract video info: {e}")
+            elif len(output) == 1:
+                duration = int(float(output[0]))
+        except: pass
 
-        # 3. Extract Thumbnail
+        # 2. Extract Thumbnail
         thumb_path = os.path.join(tempfile.gettempdir(), f"thumb_{os.path.basename(video_path)}.jpg")
         try:
             subprocess.run(["ffmpeg", "-y", "-i", video_path, "-ss", "00:00:01.000", "-vframes", "1", thumb_path], capture_output=True)
-            if not os.path.exists(thumb_path):
-                thumb_path = None
-        except Exception as e:
-            logger.warning(f"Failed to generate thumbnail: {e}")
-            thumb_path = None
+            if not os.path.exists(thumb_path): thumb_path = None
+        except: thumb_path = None
 
-        await status_msg.edit("📤 Sedang mengupload video ke Telegram...")
+        # 3. Upload Video First (Silently if possible)
+        await status_msg.edit(f"📤 **[{title}]**\nSedang mengupload video ke Telegram...")
         
-        from telethon.tl.types import DocumentAttributeVideo
         video_attributes = [
             DocumentAttributeVideo(
                 duration=duration,
@@ -74,23 +71,39 @@ async def upload_drama(client: TelegramClient, chat_id: int,
             )
         ]
         
+        # We send the final messages in a clean sequence
+        logger.info(f"Uploading final video for {title}")
+        
+        # Send Poster + Details first (Permanent)
+        await client.send_file(
+            chat_id,
+            poster_url,
+            caption=caption,
+            force_document=False
+        )
+        
+        # Send Video (Permanent)
         await client.send_file(
             chat_id,
             video_path,
-            caption=f"🎥 Full Episode: {title}",
-            force_document=False, # FORCE IT AS VIDEO STREAM
+            caption=f"🎥 **Full Episode: {title}**",
+            force_document=False,
             thumb=thumb_path,
             attributes=video_attributes,
-            progress_callback=lambda c, t: upload_progress(c, t, status_msg, "Upload Video:"),
+            progress_callback=lambda c, t: upload_progress(c, t, status_msg, f"📤 Uploading Video:"),
             supports_streaming=True
         )
         
-        await status_msg.delete()
-        if thumb_path and os.path.exists(thumb_path):
-            os.remove(thumb_path)
+        # Cleanup
+        if status_msg: await status_msg.delete()
+        if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
             
         logger.info(f"Successfully uploaded {title} to Telegram")
         return True
+
     except Exception as e:
         logger.error(f"Failed to upload to Telegram: {e}")
+        if status_msg:
+            try: await status_msg.edit(f"❌ **Upload Gagal**: {e}")
+            except: pass
         return False
