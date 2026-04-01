@@ -8,6 +8,7 @@ debug_*.py
 test_*.py
 check_*.py
 inspect_*.py
+find_*.py
 test_download/
 test_output/
 *.log
